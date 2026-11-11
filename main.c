@@ -7,6 +7,7 @@
 #include <utmp.h>
 #include <errno.h>
 #include <string.h>
+#include <termios.h>
 
 #define CHECK_ERRNO(func) ({\
 	int result = func; \
@@ -35,10 +36,36 @@ int main(int argc, char ** argv) {
 		printf("not enough arguments: %d, the argument should be login@host\n", argc);
 		exit(1);
 	}
+
+	const char *tty_name = ttyname(STDIN_FILENO);
+	if (!tty_name) {
+		printf("no controlling terminal found, please run from terminal");
+		exit(1);
+	}
+	printf("controlling terminal = %s\n", tty_name);
+
+	// int tty_fd = open(tty_name, O_RDWR);
+	// an fd attached to a terminal
+	int tty_fd = STDIN_FILENO;
+	printf("tty_fd = %d\n", tty_fd);
+
+	// set raw mode to the controlling terminal, i.e. the one who ran this program
+	struct termios termios;
+	int retval_getattr = tcgetattr(tty_fd, &termios);
+	printf("getattr retval = %d\n", retval_getattr);
+	cfmakeraw(&termios);
+	int retval_setattr = tcsetattr(tty_fd, TCSANOW, &termios);
+	printf("setattr retval = %d\n", retval_setattr);
+
+	// ssh login command
 	char *login_cmd = argv[1];
+
+	// open terminal for ssh
 	int master_fd;
 	int slave_fd;
 	int result = openpty(&master_fd, &slave_fd, NULL, NULL, NULL);
+	printf("master terminal = %s\n", ttyname(master_fd));
+	printf("slave terminal = %s\n", ttyname(slave_fd));
 	pid_t pid = fork();
 	if (!pid) {
 		login_tty(slave_fd);
