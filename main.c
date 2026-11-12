@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <string.h>
 #include <termios.h>
+#include <signal.h>
 
 #define CHECK_ERRNO(func) ({\
 	int result = func; \
@@ -31,6 +32,12 @@ static inline void handle_input(int master_fd) {
 	write(master_fd, buf, count);
 }
 
+void sigchld_handler(int signum) {
+	const char msg[] = "Recieved signal: SIGCHLD\n";
+	write(STDIN_FILENO, msg, sizeof msg);
+	_exit(0);
+}
+
 int main(int argc, char ** argv) {
 	if (argc < 2) {
 		printf("not enough arguments: %d, the argument should be login@host\n", argc);
@@ -43,6 +50,13 @@ int main(int argc, char ** argv) {
 		exit(1);
 	}
 	printf("controlling terminal = %s\n", tty_name);
+
+	// register sigchld signal handler
+	struct sigaction act;
+	act.sa_handler = sigchld_handler;
+	act.sa_flags = 0;
+	sigemptyset(&act.sa_mask);
+	CHECK_ERRNO(sigaction(SIGCHLD, &act, NULL));
 
 	// int tty_fd = open(tty_name, O_RDWR);
 	// an fd attached to a terminal
