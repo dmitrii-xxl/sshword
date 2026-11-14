@@ -1,4 +1,5 @@
 #include <sys/epoll.h>
+#include <syslog.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -10,10 +11,14 @@
 #include <termios.h>
 #include <signal.h>
 
+// volatile:     since the signal handler is called outside normal execution flow
+// sig_atomic_t: since reading normal int/long/etc... are not necesserily atomic and signal may be received during execution of any instruction
+static volatile sig_atomic_t sigchld;
+
 #define CHECK_ERRNO(func) ({\
 	int result = func; \
 	if (result == -1) { \
-		printf("Error calling " #func ": %s\n", strerror(errno));\
+		syslog(LOG_ERR, "Error calling " #func ": %s\n", strerror(errno));\
 		exit(1);\
 	}\
 	result; \
@@ -21,7 +26,8 @@
 
 static inline void handle_master_fd(int master_fd) {
 	char buf[1024];
-	ssize_t count = read(master_fd, buf, sizeof(buf));
+	ssize_t count = CHECK_ERRNO(read(master_fd, buf, sizeof buf));
+	syslog(LOG_INFO, "read %zd bytes from %d master_fd", count, master_fd);
 	printf("%.*s", count, buf);
 	fflush(stdout);
 }
@@ -29,27 +35,27 @@ static inline void handle_master_fd(int master_fd) {
 static inline void handle_input(int master_fd) {
 	char buf[1024];
 	ssize_t count = CHECK_ERRNO(read(STDIN_FILENO, buf, sizeof buf));
+	syslog(LOG_INFO, "read %zd bytes from stdin", count);
 	write(master_fd, buf, count);
 }
 
 void sigchld_handler(int signum) {
-	const char msg[] = "Recieved signal: SIGCHLD\n";
-	write(STDIN_FILENO, msg, sizeof msg);
-	_exit(0);
+	sigchld = 1;
 }
 
 int main(int argc, char ** argv) {
 	if (argc < 2) {
-		printf("not enough arguments: %d, the argument should be login@host\n", argc);
+		fprintf(stderr, "not enough arguments: %d, the argument should be login@host\n", argc);
 		exit(1);
 	}
 
 	const char *tty_name = ttyname(STDIN_FILENO);
 	if (!tty_name) {
-		printf("no controlling terminal found, please run from terminal");
+		fprintf(stderr, "no controlling terminal found, please run from terminal");
 		exit(1);
 	}
-	printf("controlling terminal = %s\n", tty_name);
+	openlog("ssh_nopass", LOG_PID, LOG_USER);
+	syslog(LOG_INFO, "controlling terminal = %s\n", tty_name);
 
 	// register sigchld signal handler
 	struct sigaction act;
@@ -61,15 +67,16 @@ int main(int argc, char ** argv) {
 	// int tty_fd = open(tty_name, O_RDWR);
 	// an fd attached to a terminal
 	int tty_fd = STDIN_FILENO;
-	printf("tty_fd = %d\n", tty_fd);
+	syslog(LOG_INFO, "tty_fd = %d\n", tty_fd);
 
 	// set raw mode to the controlling terminal, i.e. the one who ran this program
 	struct termios termios;
 	int retval_getattr = tcgetattr(tty_fd, &termios);
-	printf("getattr retval = %d\n", retval_getattr);
+	struct termios current = termios;
+	syslog(LOG_INFO, "getattr retval = %d\n", retval_getattr);
 	cfmakeraw(&termios);
 	int retval_setattr = tcsetattr(tty_fd, TCSANOW, &termios);
-	printf("setattr retval = %d\n", retval_setattr);
+	syslog(LOG_INFO, "setattr retval = %d\n", retval_setattr);
 
 	// ssh login command
 	char *login_cmd = argv[1];
@@ -78,8 +85,8 @@ int main(int argc, char ** argv) {
 	int master_fd;
 	int slave_fd;
 	int result = openpty(&master_fd, &slave_fd, NULL, NULL, NULL);
-	printf("master terminal = %s\n", ttyname(master_fd));
-	printf("slave terminal = %s\n", ttyname(slave_fd));
+	syslog(LOG_INFO, "master terminal = %s\n", ttyname(master_fd));
+	syslog(LOG_INFO, "slave terminal = %s\n", ttyname(slave_fd));
 	pid_t pid = fork();
 	if (!pid) {
 		login_tty(slave_fd);
@@ -91,8 +98,7 @@ int main(int argc, char ** argv) {
 
 		// read password prompt
 		ssize_t count = read(master_fd, buf, sizeof(buf));
-		printf("%.*s", count, buf);
-		fflush(stdout);
+		syslog(LOG_INFO, "%.*s", count, buf);
 
 		// enter password from env variable
 		char env_str[32];
@@ -102,8 +108,7 @@ int main(int argc, char ** argv) {
 
 		// read ssh connection message
 		count = read(master_fd, buf, sizeof(buf));
-		printf("%.*s", count, buf);
-		fflush(stdout);
+		syslog(LOG_INFO, "%.*s", count, buf); //TODO: logs [39B blob data] instead of actual data
 
 		count = read(master_fd, buf, sizeof(buf));
 		printf("%.*s", count, buf);
@@ -122,6 +127,11 @@ int main(int argc, char ** argv) {
 
 		// communication loop
 		for (;;) {
+			if (sigchld) {
+				syslog(LOG_INFO, "Recieved signal: SIGCHLD");
+				tcsetattr(STDIN_FILENO, TCSANOW, &current);
+				_exit(0);
+			}
 			int number_ready = epoll_wait(epoll, events, 32, 0); //TODO: Replace 32 with sizeof(events) / sizeof (*events)
 			for (int i = 0; i < number_ready; i++) {
 				struct epoll_event event = events[i];
@@ -130,7 +140,7 @@ int main(int argc, char ** argv) {
 				} else if (event.data.fd == STDIN_FILENO) {
 					handle_input(master_fd);
 				} else {
-					printf("unknown fd: %d\n", event.data.fd);
+					syslog(LOG_ERR, "unknown fd: %d\n", event.data.fd);
 					exit(1);
 				}
 			}
